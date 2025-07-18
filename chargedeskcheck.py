@@ -84,24 +84,71 @@ CATEGORY_KEYWORDS = {
 # Precompute lowercase keyword mapping for speed
 LOWER_KEYWORDS = {cat: [k.lower() for k in kws] for cat, kws in CATEGORY_KEYWORDS.items()}
 
-def categorize_description(text: str) -> str:
-    """
-    Return comma-separated list of categories whose keyword substrings appear in the description.
-    If none match, return empty string.
-    """
+def normalize_desc(text: str) -> str:
     if not isinstance(text, str):
         return ""
-    desc = text.strip().lower()
-    if not desc:
+    t = text.lower()
+    # unify separators
+    t = t.replace('&', ' and ')
+    t = re.sub(r'[-_/]', ' ', t)
+    # drop punctuation except spaces and alphanum
+    t = re.sub(r'[^a-z0-9 ]+', ' ', t)
+    # collapse spaces
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def categorize_description(text: str) -> str:
+    """
+    More robust categorizer:
+    1. Exact / phrase substring match (normalized) using provided keyword lists.
+    2. Heuristic token rules (eg any 'tax' + 'return' becomes Tax return).
+    3. Avoid duplicates, return comma separated categories.
+    """
+    norm = normalize_desc(text)
+    if not norm:
         return ""
-    hits = []
+    hits = set()
+
+    # 1. phrase matches (normalized)
     for cat, kw_list in LOWER_KEYWORDS.items():
         for kw in kw_list:
-            if kw in desc:
-                hits.append(cat)
-                break  # avoid duplicate category if multiple keywords match
-    # If multiple categories detected (e.g. 'tax return review'), include all unique
-    return ", ".join(sorted(set(hits)))
+            kw_norm = normalize_desc(kw)
+            if kw_norm and kw_norm in norm:
+                hits.add(cat)
+                break
+
+    tokens = set(norm.split())
+
+    # 2. heuristic rules
+    if {'tax', 'return'} & tokens and 'return' in tokens:
+        hits.add("Tax return")
+    if any(tok.startswith('consult') for tok in tokens) or 'planning' in tokens:
+        hits.add("Consultation")
+    if 'audit' in tokens:
+        hits.add("Audit")
+    if {'segregation','study'} & tokens or {'withholdings','analysis'} & tokens:
+        hits.add("CSS")
+    if 'bookkeeping' in tokens or 'cleanup' in tokens:
+        hits.add("Bookkeeping & cleanup")
+    if 'payroll' in tokens:
+        hits.add("Payroll service")
+    if 'dissolution' in tokens or (tokens & {'formation','conversion'}):
+        hits.add("Entity formation & restructuring")
+    if 'letter' in tokens or 'poa' in tokens or {'diagnostic','call'} <= tokens:
+        hits.add("Letters")
+    if 'review' in tokens:
+        hits.add("Review services")
+    if 'sales' in tokens and 'tax' in tokens:
+        hits.add("Sales tax")
+    if 'projection' in tokens or 'trial' in tokens or {'numerical','analysis'} <= tokens:
+        hits.add("Projections")
+    compliance_markers = {'annual','biennial','ein','fbar','form','franchise','installment','appeal','representation','disclosure'}
+    if compliance_markers & tokens:
+        hits.add("Compliance & filings")
+
+    if not hits:
+        return ""
+    return ", ".join(sorted(hits))
 
 st.set_page_config(page_title="Transaction Matcher", layout="wide")
 
@@ -133,31 +180,24 @@ if trans_file and list_files:
         st.error(f"Could not read transaction file: {e}")
         st.stop()
 
-    # Guess email column
-    email_cols = [c for c in trans_df.columns if 'email' in c.lower()]
-    if not email_cols:
-        st.error("No column containing 'email' found in transaction file.")
-        st.stop()
-    email_col = email_cols[0]
+    # --- Column selection UI (manual override for robustness) ---
+    all_cols = list(trans_df.columns)
 
-    # Guess amount column
-    amount_cols = [c for c in trans_df.columns if 'amount' in c.lower() or 'total' in c.lower()]
-    if not amount_cols:
-        st.error("No column containing 'amount' or 'total' found in transaction file.")
-        st.stop()
-    amount_col = amount_cols[0]
+    email_guess = [c for c in all_cols if 'email' in c.lower()] or all_cols
+    email_col = st.selectbox("Select transaction email column", email_guess, index=0)
 
-    # Guess description column (for categorization). Try likely names.
-    desc_candidate_cols = [c for c in trans_df.columns if any(tok in c.lower() for tok in ["description", "desc", "detail", "memo", "product", "item", "invoice", "service"])]
-    description_col = None
-    if desc_candidate_cols:
-        # If multiple, let user pick
-        if len(desc_candidate_cols) > 1:
-            description_col = st.selectbox("Select description column for categorization", desc_candidate_cols, index=0)
-        else:
-            description_col = desc_candidate_cols[0]
-    else:
-        st.info("No description-like column detected. Category column will be blank.")
+    amount_guess = [c for c in all_cols if any(x in c.lower() for x in ['amount','total','charge','price','value'])]
+    amount_guess = amount_guess or all_cols
+    amount_col = st.selectbox("Select amount column", amount_guess, index=0)
+
+    desc_guess = [c for c in all_cols if any(x in c.lower() for x in ['description','desc','detail','memo','product','item','invoice','service','notes','note'])]
+    description_col = st.selectbox(
+        "Select description column (for category detection)",
+        ['(none)'] + desc_guess if desc_guess else ['(none)'] + all_cols,
+        index=1 if desc_guess else 0
+    )
+    if description_col == '(none)':
+        description_col = None
 
     # Gather emails from list files (robust parsing of any column)
     email_set = set()
@@ -189,18 +229,22 @@ if trans_file and list_files:
     # Filter matches
     matched_df = trans_df[trans_df[email_col].isin(email_set)].copy()
 
+    # Categorize before debug stats if we have a description column
+    if description_col:
+        matched_df['Category'] = matched_df[description_col].apply(categorize_description)
+    else:
+        matched_df['Category'] = ""
+
     if debug:
         st.write("Matched rows:", len(matched_df))
+        if description_col:
+            st.caption("Sample classification (first 15 descriptions)")
+            sample_class = matched_df[[description_col,'Category']].head(15)
+            st.write(sample_class)
 
     if matched_df.empty:
         st.warning("No transactions found for the provided email list(s).")
     else:
-        # Add category column based on description if available
-        if 'description_col' in locals() and description_col:
-            matched_df['Category'] = matched_df[description_col].apply(categorize_description)
-        else:
-            matched_df['Category'] = ""
-
         totals = matched_df.groupby(email_col)[amount_col].sum()
         matched_df['TotalForPerson'] = matched_df[email_col].map(totals)
 
@@ -211,6 +255,8 @@ if trans_file and list_files:
         st.dataframe(matched_df)
 
         csv_bytes = matched_df.to_csv(index=False).encode('utf-8')
+        if debug:
+            st.write("CSV size (bytes):", len(csv_bytes), "Row count (including header):", csv_bytes.count(b'\n'))
         st.download_button(
             label="Download CSV",
             data=csv_bytes,
