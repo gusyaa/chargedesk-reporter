@@ -1,6 +1,30 @@
 import pandas as pd
 import streamlit as st
 from io import StringIO, BytesIO
+import re, itertools
+
+# ---- Email list ingestion helpers ----
+EMAIL_REGEX = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.IGNORECASE)
+
+def extract_emails_from_dataframe(df: pd.DataFrame) -> set:
+    """
+    Scan all columns, extract anything that looks like an email address.
+    Handles cells with multiple emails separated by comma/semicolon/space.
+    Returns a set of normalized (lowercase, trimmed) emails.
+    """
+    emails = set()
+    for col in df.columns:
+        series = df[col].dropna().astype(str)
+        for cell in series:
+            # Split on common delimiters first to reduce false positives
+            fragments = re.split(r'[;,\\s]+', cell)
+            for frag in fragments:
+                for match in EMAIL_REGEX.findall(frag):
+                    emails.add(match.strip().lower())
+    return emails
+
+def summarize_email_file(name: str, emails: set) -> str:
+    return f"{name}: {len(emails)} emails"
 
 # ---- Category classification setup ----
 # Mapping of category name -> list of keyword/phrase substrings (all matched case-insensitively)
@@ -92,6 +116,7 @@ The app will show all matching transactions and totals per email. Then you can d
 
 trans_file = st.file_uploader("Transaction file", type=["csv", "xlsx"])
 list_files = st.file_uploader("Email list file(s)", type=["csv", "xlsx"], accept_multiple_files=True)
+debug = st.checkbox("Show debug details", value=False)
 
 def read_file(file):
     """Read CSV or Excel into a DataFrame"""
@@ -134,22 +159,38 @@ if trans_file and list_files:
     else:
         st.info("No description-like column detected. Category column will be blank.")
 
-    # Gather emails from list files
+    # Gather emails from list files (robust parsing of any column)
     email_set = set()
+    per_file_counts = []
     for lf in list_files:
         try:
             df_list = read_file(lf)
         except Exception as e:
             st.error(f"Could not read list file {lf.name}: {e}")
             st.stop()
-        first_col = df_list.columns[0]
-        email_set.update(df_list[first_col].astype(str).str.strip().str.lower())
+        found = extract_emails_from_dataframe(df_list)
+        email_set.update(found)
+        per_file_counts.append(summarize_email_file(lf.name, found))
+
+    if debug:
+        st.caption("Email list ingestion debug")
+        st.write(per_file_counts)
+        st.write("Total unique emails loaded:", len(email_set))
+        # Show a sample
+        st.write(list(itertools.islice(email_set, 20)))
 
     # Normalize transaction emails
     trans_df[email_col] = trans_df[email_col].astype(str).str.strip().str.lower()
 
+    if debug:
+        st.caption("Transaction email column sample")
+        st.write(trans_df[email_col].head(20).tolist())
+
     # Filter matches
     matched_df = trans_df[trans_df[email_col].isin(email_set)].copy()
+
+    if debug:
+        st.write("Matched rows:", len(matched_df))
 
     if matched_df.empty:
         st.warning("No transactions found for the provided email list(s).")
