@@ -151,6 +151,7 @@ def categorize_description(text: str) -> str:
     return ", ".join(sorted(hits))
 
 st.set_page_config(page_title="Transaction Matcher", layout="wide")
+st.markdown("**made by Egor for internal use**")
 
 st.title("Transaction Matcher")
 
@@ -184,17 +185,27 @@ if trans_file and list_files:
     all_cols = list(trans_df.columns)
 
     email_guess = [c for c in all_cols if 'email' in c.lower()] or all_cols
-    email_col = st.selectbox("Select transaction email column", email_guess, index=0)
+    preferred_email = "Customer Email"
+    email_index = email_guess.index(preferred_email) if preferred_email in email_guess else 0
+    email_col = st.selectbox("Select transaction email column", email_guess, index=email_index)
 
     amount_guess = [c for c in all_cols if any(x in c.lower() for x in ['amount','total','charge','price','value'])]
     amount_guess = amount_guess or all_cols
-    amount_col = st.selectbox("Select amount column", amount_guess, index=0)
+    preferred_amount = "Amount"
+    amount_index = amount_guess.index(preferred_amount) if preferred_amount in amount_guess else 0
+    amount_col = st.selectbox("Select amount column", amount_guess, index=amount_index)
 
     desc_guess = [c for c in all_cols if any(x in c.lower() for x in ['description','desc','detail','memo','product','item','invoice','service','notes','note'])]
+    preferred_desc = "Description"
+    desc_options = ['(none)'] + desc_guess if desc_guess else ['(none)'] + all_cols
+    if preferred_desc in desc_options:
+        default_desc_index = desc_options.index(preferred_desc)
+    else:
+        default_desc_index = 1 if desc_guess else 0
     description_col = st.selectbox(
         "Select description column (for category detection)",
-        ['(none)'] + desc_guess if desc_guess else ['(none)'] + all_cols,
-        index=1 if desc_guess else 0
+        desc_options,
+        index=default_desc_index
     )
     if description_col == '(none)':
         description_col = None
